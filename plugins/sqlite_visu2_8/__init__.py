@@ -150,6 +150,7 @@ class SQL(SmartPlugin):
                 self._execute("INSERT OR IGNORE INTO cache VALUES('{}',{},{})".format(item.id(), last_change, float(item())))
             self._buffer[item] = []
             item.series = functools.partial(self._series, item=item.id())
+            item.series2 = functools.partial(self._series2, item=item.id())
             item.db = functools.partial(self._single, item=item.id())
             return self.update_item
         else:
@@ -361,6 +362,63 @@ class SQL(SmartPlugin):
             if init:
                 tuples.append((iend, value))
         if tuples:
+            reply['series'] = tuples
+        return reply
+
+    def _series2(self, func, start, end='now', count=100, ratio=1, update=False, step=None, sid=None, item=None):
+        init = not update
+        if sid is None:
+            sid = item + '|' + func + '|' + start + '|' + end + '|' + str(count)
+        istart = self._get_timestamp(start)
+        iend = self._get_timestamp(end)
+        print("istart={0} iend={1}".format(istart, iend))
+        if step is None:
+            if count != 0:
+                step = int((iend - istart) / int(count))
+            else:
+                step = iend - istart
+        reply = {'cmd': 'series', 'series': None, 'sid': sid}
+        reply['params'] = {'update': True, 'item': item, 'func': func, 'start': iend, 'end': end, 'step': step, 'sid': sid}
+        reply['update'] = self._sh.now() + datetime.timedelta(seconds=int(step / 1000))
+        where = " from num WHERE _item='{0}' AND _start + _dur >= {1} AND _start <= {2} GROUP by CAST((_start / {3}) AS INTEGER)".format(item, istart, iend, step)
+        if func == 'avg':
+            query = "SELECT MIN(_start), ROUND(SUM(_avg * _dur) / SUM(_dur), 2)" + where + " ORDER BY _start ASC"
+        elif func == 'min':
+            query = "SELECT MIN(_start), MIN(_min)" + where
+        elif func == 'max':
+            query = "SELECT MIN(_start), MAX(_max)" + where
+        elif func == 'on':
+            query = "SELECT MIN(_start), ROUND(SUM(_on * _dur) / SUM(_dur), 2)" + where + " ORDER BY _start ASC"
+        else:
+            raise NotImplementedError
+        _item = self._sh.return_item(item)
+        if self._buffer[_item] != [] and end == 'now':
+            self._insert(_item)
+        tuples = self._fetchall(query)
+        if tuples:
+            print(tuples)
+            if istart > tuples[0][0]:
+                # ts of first point is before istart -> change it to istart
+                tuples[0] = (istart, tuples[0][1])
+        else:
+            tuples = []
+        item_change = self._timestamp(_item.last_change())
+        if item_change < iend:
+            value = float(_item())
+            if item_change < istart:
+                # item last_change before istart and iend -> add point (istart | current value)
+                tuples.append((istart, value))
+            elif init:
+                # item last_change between istart and iend and not "update" -> add point (item_change | current value)
+                tuples.append((item_change, value))
+            if init:
+                # item last_change before iend and not "update" -> add point (iend, current value)
+                tuples.append((iend, value))
+        if tuples:
+            if iend < tuples[-1][0]:
+                # ts of last item less than iend -> add point (iend | value from last item)
+                tuples.append((iend, tuples[-1][1]))
+
             reply['series'] = tuples
         return reply
 
